@@ -7,7 +7,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from datetime import date
+
 from wc_edge import tournament as T
+from wc_edge import tracker as TR
 from wc_edge import value as V
 from wc_edge.backtest import backtest_world_cups, calibration_table, summarize
 from wc_edge.data import load_results, refresh_results
@@ -43,6 +46,19 @@ def get_backtest():
 model, played, upcoming = get_model()
 TEAMS = sorted(model.elo.ratings.keys(), key=lambda t: -model.elo.get(t))
 WC_FIXTURES = upcoming[upcoming["tournament"] == "FIFA World Cup"].copy()
+DATA_STAMP = f"{played['date'].max().date()}-{len(played)}"
+
+
+def rotation_flags(sim_table, threshold=0.999):
+    """Teams whose round-of-32 fate is (virtually) sealed before they've
+    finished the group — prime rotation / low-motivation spots."""
+    flags = {}
+    for t, p in sim_table["Make R32"].items():
+        if p >= threshold:
+            flags[t] = "through"
+        elif p <= 1.0 - threshold:
+            flags[t] = "out"
+    return flags
 
 
 # ----------------------------------------------------------------- sidebar
@@ -86,9 +102,9 @@ with st.sidebar:
         f"{len(played):,} matches · {len(WC_FIXTURES)} WC fixtures loaded"
     )
 
-(tab_analyze, tab_fixtures, tab_tournament, tab_rankings, tab_validate,
- tab_help) = st.tabs(
-    ["🎯 Match Analyzer", "📅 Fixtures", "🏆 Tournament Sim",
+(tab_analyze, tab_fixtures, tab_tournament, tab_tracker, tab_rankings,
+ tab_validate, tab_help) = st.tabs(
+    ["🎯 Match Analyzer", "📅 Fixtures", "🏆 Tournament Sim", "📒 Bet Tracker",
      "📊 Power Rankings", "🧪 Model Validation", "📖 How It Works"]
 )
 
@@ -225,17 +241,34 @@ with tab_analyze:
 
     outcomes = [(f"{team_a} win", pred["home"]), ("Draw", pred["draw"]),
                 (f"{team_b} win", pred["away"])]
-    pick, p_pick = max(outcomes, key=lambda kv: kv[1])
+    pick_outcome, p_pick = max(outcomes, key=lambda kv: kv[1])
     (bi, bj), p_score = pred["top_scores"][0]
     conf = ("strong" if p_pick >= 0.60 else
             "moderate" if p_pick >= 0.45 else "slight — close to a coin flip")
-    pick_line = (f"**Model pick: {pick}** ({p_pick:.0%}, {conf} confidence) · "
-                 f"most likely score **{bi}–{bj}** ({p_score:.0%})")
+    pick_line = (f"**Model pick: {pick_outcome}** ({p_pick:.0%}, {conf} "
+                 f"confidence) · most likely score **{bi}–{bj}** ({p_score:.0%})")
     if knockout:
         adv = team_a if pred["advance_a"] >= 0.5 else team_b
         pick_line += (f" · **{adv} to advance** "
                       f"({max(pred['advance_a'], pred['advance_b']):.0%})")
     st.info(pick_line)
+
+    if pick != "Manual team selection" and row["date"] <= T.GROUP_STAGE_END:
+        flags = rotation_flags(get_simulation(10000, DATA_STAMP)[0])
+        flagged = [(t, flags[t]) for t in (team_a, team_b) if t in flags]
+        if flagged:
+            msg = " and ".join(
+                f"**{t}** are already "
+                + ("through to the round of 32" if f == "through"
+                   else "eliminated")
+                for t, f in flagged)
+            st.warning(
+                f"⚠️ **Dead-rubber risk:** {msg} regardless of this result. "
+                "Expect rotation and low intensity — the model can't see "
+                "lineups, so its probabilities are least trustworthy here. "
+                "Skipping (or fading the unmotivated side at a good price) "
+                "is usually the play."
+            )
 
     st.divider()
     st.subheader(f"Enter your sportsbook's odds ({odds_format.lower()})")
@@ -248,6 +281,38 @@ with tab_analyze:
     odds_h = odds_input(oc1, f"{team_a} win", "oh", "e.g. 2.50")
     odds_d = odds_input(oc2, "Draw", "od", "e.g. 3.30")
     odds_a = odds_input(oc3, f"{team_b} win", "oa", "e.g. 2.90")
+
+    with st.expander("🎯 Sharp anchor — blend the model with a sharp book "
+                     "(recommended)"):
+        st.caption(
+            "Enter the 1X2 from the sharpest book you can see (Pinnacle, "
+            "Circa, betting exchanges). Their devigged line is the best "
+            "single estimate of the truth, so the value report below will "
+            "use a model/market blend instead of the raw model — this "
+            "protects you from model blind spots like injuries and rotation. "
+            "You still profit by betting SOFT books whose prices stray from "
+            "the blend."
+        )
+        sc1, sc2, sc3, sc4 = st.columns([2, 2, 2, 3])
+        sharp_h = odds_input(sc1, f"{team_a} win (sharp)", "sh", "e.g. 2.45")
+        sharp_d = odds_input(sc2, "Draw (sharp)", "sd", "e.g. 3.25")
+        sharp_a = odds_input(sc3, f"{team_b} win (sharp)", "sa", "e.g. 2.95")
+        w_model = sc4.slider(
+            "Model weight in blend", 0.0, 1.0, 0.3, 0.05,
+            help="0.3 = trust the sharp market 70%, the model 30%. "
+                 "Raise it only if you really believe the model knows "
+                 "something the market doesn't.",
+        )
+
+    p_h, p_d, p_a = pred["home"], pred["draw"], pred["away"]
+    if sharp_h and sharp_d and sharp_a:
+        p_sharp = V.devig([sharp_h, sharp_d, sharp_a], devig_method)
+        p_h, p_d, p_a = V.blend_probs([p_h, p_d, p_a], p_sharp, w_model)
+        st.caption(
+            f"Using blended 1X2 probabilities: {team_a} {p_h:.1%} · "
+            f"draw {p_d:.1%} · {team_b} {p_a:.1%} "
+            f"(model {w_model:.0%} / sharp market {1 - w_model:.0%})"
+        )
 
     with st.expander("More markets: totals, BTTS" + (", to advance" if knockout else "")):
         t1, t2, t3, t4 = st.columns(4)
@@ -264,9 +329,9 @@ with tab_analyze:
     rows = []
     if odds_h and odds_d and odds_a:
         rows += value_rows(
-            [(f"{team_a} win", pred["home"], odds_h),
-             ("Draw", pred["draw"], odds_d),
-             (f"{team_b} win", pred["away"], odds_a)],
+            [(f"{team_a} win", p_h, odds_h),
+             ("Draw", p_d, odds_d),
+             (f"{team_b} win", p_a, odds_a)],
             bankroll, kelly_mult, min_edge, devig_method)
         ovr = V.overround([odds_h, odds_d, odds_a])
         st.caption(f"1X2 overround: {ovr:.3f} → bookmaker margin "
@@ -359,6 +424,7 @@ with tab_fixtures:
     if WC_FIXTURES.empty:
         st.info("No upcoming WC fixtures in the dataset. Hit refresh in the sidebar.")
     else:
+        fx_flags = rotation_flags(get_simulation(10000, DATA_STAMP)[0])
         recs = []
         for _, r in WC_FIXTURES.iterrows():
             p = model.predict(r["home_team"], r["away_team"],
@@ -366,11 +432,17 @@ with tab_fixtures:
             probs = {r["home_team"]: p["home"], "Draw": p["draw"],
                      r["away_team"]: p["away"]}
             pick = max(probs, key=probs.get)
+            warn = ""
+            if r["date"] <= T.GROUP_STAGE_END:
+                warn = " · ".join(
+                    f"⚠️ {t} {'through' if fx_flags[t] == 'through' else 'out'}"
+                    for t in (r["home_team"], r["away_team"]) if t in fx_flags)
             recs.append({
                 "Date": r["date"].date(),
                 "Match": f"{r['home_team']}{'' if r['neutral'] else ' 🏠'} vs {r['away_team']}",
                 "City": r["city"],
                 "Model pick": f"{pick} ({probs[pick]:.0%})",
+                "Motivation": warn,
                 f"P(home)": p["home"], "P(draw)": p["draw"], "P(away)": p["away"],
                 "Fair 1": 1 / p["home"], "Fair X": 1 / p["draw"], "Fair 2": 1 / p["away"],
                 "O2.5 %": p["over"][2.5],
@@ -477,6 +549,139 @@ with tab_tournament:
                            "remember the futures-margin caveat above.")
             else:
                 st.info("No value at this price.")
+
+
+# ------------------------------------------------------------ Bet Tracker
+
+with tab_tracker:
+    st.subheader("Bet tracker — prove the edge with closing line value")
+    st.caption(
+        "Log every bet **when you place it**. After kickoff, fill in the "
+        "**closing odds** (the book's final pre-match price on your "
+        "selection) and the result. If you consistently beat the close, you "
+        "have a real edge no matter what this week's results say. "
+        "⚠️ On Streamlit Cloud the log resets when the app reboots — "
+        "download the CSV regularly, or do your real tracking on the local "
+        "copy."
+    )
+
+    bet_log = TR.load_log()
+
+    with st.form("add_bet", clear_on_submit=True):
+        a1, a2 = st.columns([3, 2])
+        match_opts = ["Type manually"] + [
+            fmt_fixture(r) for _, r in WC_FIXTURES.iterrows()
+        ]
+        match_pick = a1.selectbox("Match", match_opts)
+        match_manual = a2.text_input("Manual match (if not listed)")
+        b1, b2, b3, b4 = st.columns([3, 2, 2, 2])
+        bet_sel = b1.text_input("Market / selection",
+                                placeholder="e.g. 1X2 — Draw, or Over 2.5")
+        bet_odds = odds_input(b2, "Odds taken", "tr_odds", "e.g. 3.30")
+        bet_stake = b3.number_input("Stake $", min_value=0.0, value=None,
+                                    placeholder="25")
+        bet_modelp = b4.number_input("Model prob % (optional)", 0.0, 100.0,
+                                     value=None, placeholder="38")
+        bet_submit = st.form_submit_button("➕ Log bet")
+
+    if bet_submit:
+        match_txt = (match_manual if match_pick == "Type manually"
+                     else match_pick)
+        if not (match_txt and bet_sel and bet_odds and bet_stake):
+            st.warning("Need at least a match, selection, odds and stake.")
+        else:
+            new = pd.DataFrame([{
+                "placed": str(date.today()), "match": match_txt,
+                "selection": bet_sel, "odds": bet_odds, "stake": bet_stake,
+                "model_p": bet_modelp / 100.0 if bet_modelp else None,
+                "closing_odds": None, "result": "pending",
+            }])
+            bet_log = pd.concat([bet_log, new], ignore_index=True)
+            TR.save_log(bet_log)
+            st.success("Bet logged. Fill in closing odds + result after the match.")
+
+    if bet_log.empty:
+        st.info("No bets logged yet. Add your first one above — and from now "
+                "on, log EVERY bet, including the losers. CLV only means "
+                "something on a complete record.")
+    else:
+        st.caption(
+            "Edit directly in the table (odds in **decimal** here). "
+            "Set the result and closing odds as matches finish — changes "
+            "save automatically."
+        )
+        edited = st.data_editor(
+            bet_log, num_rows="dynamic", width="stretch", key="bet_editor",
+            column_config={
+                "placed": st.column_config.TextColumn("Placed"),
+                "match": st.column_config.TextColumn("Match", width="large"),
+                "selection": st.column_config.TextColumn("Selection"),
+                "odds": st.column_config.NumberColumn(
+                    "Odds taken (dec)", format="%.2f", min_value=1.01),
+                "stake": st.column_config.NumberColumn(
+                    "Stake $", format="$%.2f", min_value=0.0),
+                "model_p": st.column_config.NumberColumn(
+                    "Model p", format="%.3f", min_value=0.0, max_value=1.0,
+                    help="Model probability as a fraction, e.g. 0.38"),
+                "closing_odds": st.column_config.NumberColumn(
+                    "Closing (dec)", format="%.2f", min_value=1.01),
+                "result": st.column_config.SelectboxColumn(
+                    "Result", options=TR.RESULTS),
+            },
+        )
+        if not edited.equals(bet_log):
+            TR.save_log(edited)
+            bet_log = edited
+
+        m = TR.with_metrics(bet_log)
+        s = TR.summary(m)
+        t1, t2, t3, t4, t5, t6 = st.columns(6)
+        t1.metric("Bets", f"{s['bets']} ({s['record']})")
+        t2.metric("Staked", f"${s['staked']:,.2f}")
+        t3.metric("P/L", f"${s['pl']:+,.2f}")
+        t4.metric("ROI (settled)", f"{s['roi']:+.1%}")
+        t5.metric("Avg CLV", "—" if s["avg_clv"] is None
+                  else f"{s['avg_clv']:+.1%}",
+                  "the number that matters", delta_color="off")
+        t6.metric("Beat the close", "—" if s["beat_close"] is None
+                  else f"{s['beat_close']:.0%}",
+                  "aim for >50%", delta_color="off")
+
+        mm = m.reset_index(drop=True)
+        mm["Bet #"] = mm.index + 1
+        mm["Actual P/L"] = mm["P/L $"].cumsum()
+        mm["Expected P/L"] = mm["EV $"].fillna(0.0).cumsum()
+        cum = mm.melt("Bet #", ["Actual P/L", "Expected P/L"],
+                      var_name="Series", value_name="Cumulative $")
+        clv_chart = (
+            alt.Chart(cum).mark_line(point=True).encode(
+                x="Bet #:Q",
+                y="Cumulative $:Q",
+                color=alt.Color("Series:N", title=None),
+                tooltip=["Bet #", "Series",
+                         alt.Tooltip("Cumulative $:Q", format="$,.2f")],
+            ).properties(height=280)
+        )
+        st.altair_chart(clv_chart, use_container_width=True)
+        st.caption(
+            "If **Actual** tracks **Expected** over dozens of bets, the "
+            "model's edges are real and you're just riding variance. If "
+            "Actual lags far below Expected long-term, the edges were "
+            "imaginary — tighten up (raise min EV, lean more on the sharp "
+            "anchor)."
+        )
+
+        d1, d2 = st.columns(2)
+        d1.download_button(
+            "⬇️ Download log (CSV)", m.to_csv(index=False),
+            file_name="bet_log.csv", width="stretch",
+        )
+        with d2.expander("⬆️ Restore log from CSV"):
+            up = st.file_uploader("Upload a previously downloaded bet_log.csv",
+                                  type="csv")
+            if up is not None and st.button("Restore (replaces current log)"):
+                TR.save_log(pd.read_csv(up))
+                st.rerun()
 
 
 # --------------------------------------------------------- Power Rankings
@@ -597,6 +802,19 @@ with tab_help:
 - **Kelly staking** sizes bets proportionally to the edge. Quarter Kelly is
   the default because full Kelly assumes your probabilities are exactly
   right, and they aren't.
+- **The sharp anchor** (Match Analyzer): the devigged line at a sharp book
+  (Pinnacle, Circa, exchanges) is the best single estimate of the truth —
+  better than any public model. Blending the model with it (default 30/70)
+  protects you from model blind spots; you still profit by betting SOFT
+  books whose prices stray from the blend.
+- **Closing line value** (Bet Tracker tab) is how professionals measure
+  themselves: did you get a better price than the market's final word? Beat
+  the close consistently and profit follows; results over any one week are
+  just variance.
+- **Dead rubbers are the model's blind spot.** When a team's round-of-32
+  fate is sealed before matchday 3, expect rotation — the app flags these
+  from the tournament sim. Skipping flagged games (or fading the
+  unmotivated side) is usually right.
 
 #### Honest expectations
 - The backtest shows the model is **well-calibrated and competitive with

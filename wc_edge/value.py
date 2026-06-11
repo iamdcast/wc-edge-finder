@@ -61,6 +61,19 @@ def devig(odds, method="shin"):
     return devig_proportional(odds)
 
 
+def blend_probs(p_model, p_market, w_model=0.3):
+    """Geometric (log-odds) blend of model and devigged sharp-market probs.
+
+    The sharp closing market is the best single estimate of truth there is;
+    blending protects against model blind spots (team news, rotation) while
+    keeping the model's independent signal. w_model is the model's weight.
+    """
+    pm = np.clip(np.asarray(p_model, dtype=float), 1e-9, 1.0)
+    pk = np.clip(np.asarray(p_market, dtype=float), 1e-9, 1.0)
+    p = pm ** w_model * pk ** (1.0 - w_model)
+    return p / p.sum()
+
+
 def expected_value(p_model, odds):
     """EV per unit staked."""
     return p_model * odds - 1.0
