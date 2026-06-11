@@ -9,6 +9,7 @@ import streamlit as st
 
 from datetime import date
 
+from wc_edge import record as R
 from wc_edge import tournament as T
 from wc_edge import tracker as TR
 from wc_edge import value as V
@@ -32,6 +33,12 @@ def get_model():
 def get_simulation(n_sims, data_stamp):
     model, played, upcoming = get_model()
     return T.simulate(model, played, upcoming, n_sims=n_sims)
+
+
+@st.cache_data(show_spinner="Scoring the model's 2026 predictions…")
+def get_live_record(data_stamp):
+    model, played, upcoming = get_model()
+    return R.live_record(played)
 
 
 @st.cache_data(show_spinner="Backtesting on World Cups 2006–2022 (walk-forward)…")
@@ -66,9 +73,10 @@ def rotation_flags(sim_table, threshold=0.999):
 with st.sidebar:
     st.title("⚽ WC Edge Finder")
     st.caption(
-        "Find **value**, not winners. A bet is good when the book's implied "
-        "probability is lower than the true one — even if it loses more often "
-        "than it wins."
+        "Pick the games **and** beat the price. Every match gets a model "
+        "pick and most likely score — tracked on 📡 2026 Record. But a bet "
+        "is only good when the book's implied probability is lower than the "
+        "true one. Picks fill the scoreboard; value pays the bills."
     )
     odds_format = st.selectbox(
         "Odds format", ["American", "Decimal"],
@@ -102,10 +110,11 @@ with st.sidebar:
         f"{len(played):,} matches · {len(WC_FIXTURES)} WC fixtures loaded"
     )
 
-(tab_analyze, tab_fixtures, tab_tournament, tab_tracker, tab_rankings,
- tab_validate, tab_help) = st.tabs(
-    ["🎯 Match Analyzer", "📅 Fixtures", "🏆 Tournament Sim", "📒 Bet Tracker",
-     "📊 Power Rankings", "🧪 Model Validation", "📖 How It Works"]
+(tab_analyze, tab_fixtures, tab_tournament, tab_record, tab_tracker,
+ tab_rankings, tab_validate, tab_help) = st.tabs(
+    ["🎯 Match Analyzer", "📅 Fixtures", "🏆 Tournament Sim", "📡 2026 Record",
+     "📒 Bet Tracker", "📊 Power Rankings", "🧪 Model Validation",
+     "📖 How It Works"]
 )
 
 
@@ -549,6 +558,75 @@ with tab_tournament:
                            "remember the futures-margin caveat above.")
             else:
                 st.info("No value at this price.")
+
+
+# ------------------------------------------------------------ 2026 Record
+
+with tab_record:
+    st.subheader("Model record — every 2026 call, scored")
+    st.caption(
+        "For each completed match this reconstructs what the model said "
+        "**before kickoff** — trained only on matches played earlier, the "
+        "same no-peeking protocol as the backtest — and scores it against "
+        "the final. Hit 🔄 Refresh in the sidebar after each matchday; new "
+        "results land here automatically (the upstream dataset usually "
+        "updates within a day)."
+    )
+    rec = get_live_record(DATA_STAMP)
+    if rec.empty:
+        st.info(
+            "No completed 2026 World Cup matches in the dataset yet. "
+            "Refresh after each matchday and the scoreboard fills in — "
+            "every pick, every called score, ✅ or ❌."
+        )
+    else:
+        rs = R.record_summary(rec)
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Picks correct", f"{rs['pick_hits']}/{rs['matches']}",
+                  f"{rs['accuracy']:.0%} — backtest baseline 57.8%",
+                  delta_color="off")
+        r2.metric("Exact scores called", f"{rs['score_hits']}/{rs['matches']}",
+                  "most likely score = final score", delta_color="off")
+        r3.metric("Brier score", f"{rs['brier']:.3f}",
+                  "backtest 0.565 · guessing 0.667 · lower = better",
+                  delta_color="off")
+        r4.metric("Log loss", f"{rs['logloss']:.3f}",
+                  "backtest 0.961 · guessing 1.099", delta_color="off")
+
+        rec_show = pd.DataFrame({
+            "Date": rec["date"].dt.date,
+            "Match": rec["match"],
+            "Final": rec["final"],
+            "Model pick": [f"{p} ({q:.0%})"
+                           for p, q in zip(rec["pick"], rec["p_pick"])],
+            "Pick": np.where(rec["pick_hit"], "✅", "❌"),
+            "Called score": [f"{s} ({q:.0%})"
+                             for s, q in zip(rec["called_score"],
+                                             rec["p_called_score"])],
+            "Score": np.where(rec["score_hit"], "🎯", "—"),
+            "P(what happened)": rec["p_outcome"],
+        })
+        st.dataframe(
+            rec_show.style.format({"P(what happened)": "{:.0%}"}).apply(
+                lambda r: ["background-color: rgba(46, 160, 67, 0.15)"
+                           if r["Pick"] == "✅" else ""] * len(r),
+                axis=1,
+            ),
+            hide_index=True, width="stretch",
+            height=min(600, 60 + 35 * len(rec_show)),
+        )
+        st.caption(
+            "**Does this feed back into the model?** Yes — the right way. "
+            "Every refresh updates Elo with the new results and "
+            "re-conditions the tournament sim, so tomorrow's predictions "
+            "already know today's scores. What it deliberately does *not* "
+            "do is re-tune model parameters on a handful of 2026 games — "
+            "that's how you fit noise and get burned. Use this tab as the "
+            "scoreboard: if Brier drifts well above the 0.565 baseline "
+            "over 20+ matches, trust the sharp anchor more. "
+            "Knockout caveat: the dataset records scores after extra time, "
+            "so ET games are judged on the 120' score."
+        )
 
 
 # ------------------------------------------------------------ Bet Tracker
