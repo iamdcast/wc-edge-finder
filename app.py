@@ -196,17 +196,32 @@ def render_recommendation(rows, bankroll, min_edge, dead_rubber=False):
                 "only shows up over dozens of bets.")
         st.success(msg)
     else:
-        best = max(rows, key=lambda r: r["EV %"])
-        need = min_betable_odds(best["Model %"], min_edge)
-        st.warning(
-            f"### ⚪ Recommendation: PASS\n"
-            f"No selection clears the {min_edge:.0%} EV bar at these prices — "
-            f"not betting is the correct play here. Closest: "
-            f"**{best['Market']}** at {fmt_odds(best['Book odds'])} "
-            f"(EV {best['EV %']:+.1%}); it becomes a bet at "
-            f"**{fmt_odds(need)}** or better. Shop other books for that "
-            f"number."
-        )
+        checks = [r for r in rows if r["Verdict"] == "CHECK INPUTS"]
+        if checks:
+            best = max(checks, key=lambda r: r["EV %"])
+            st.warning(
+                f"### 🟡 Recommendation: VERIFY, THEN BET\n"
+                f"**{best['Market']}** at {fmt_odds(best['Book odds'])} shows "
+                f"EV **{best['EV %']:+.1%}** (model {best['Model %']:.1%} vs "
+                f"devigged book {best['Devig %']:.1%}). An edge that big is "
+                f"usually a typo or news the model can't see — re-check the "
+                f"odds you entered, the team news, and ideally a sharp book's "
+                f"line in the anchor above. If the price is real and there's "
+                f"no news, it's a bet: stake **${best['Stake $']:,.2f}** "
+                f"({best['Stake $'] / bankroll:.1%} of bankroll)."
+            )
+        else:
+            best = max(rows, key=lambda r: r["EV %"])
+            need = min_betable_odds(best["Model %"], min_edge)
+            st.warning(
+                f"### ⚪ Recommendation: PASS\n"
+                f"No selection clears the {min_edge:.0%} EV bar at these "
+                f"prices — not betting is the correct play here. Closest: "
+                f"**{best['Market']}** at {fmt_odds(best['Book odds'])} "
+                f"(EV {best['EV %']:+.1%}); it becomes a bet at "
+                f"**{fmt_odds(need)}** or better. Shop other books for that "
+                f"number."
+            )
     if dead_rubber:
         st.caption(
             "⚠️ Dead-rubber risk above still applies — if you bet at all, "
