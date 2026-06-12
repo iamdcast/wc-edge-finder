@@ -166,6 +166,54 @@ def value_rows(selections, bankroll, kelly_mult, min_edge, devig_method):
     ]
 
 
+def min_betable_odds(p, min_edge):
+    """Smallest decimal price at which a selection clears the EV threshold."""
+    return (1.0 + min_edge) / p
+
+
+def render_recommendation(rows, bankroll, min_edge, dead_rubber=False):
+    """One clear verdict: the best bet at these prices, or an explicit pass."""
+    bets = sorted((r for r in rows if r["Verdict"] == "BET"),
+                  key=lambda r: -r["EV %"])
+    if bets:
+        best = bets[0]
+        msg = (
+            f"### 🟢 Recommendation: {best['Market']} @ {fmt_odds(best['Book odds'])}\n"
+            f"Stake **${best['Stake $']:,.2f}** "
+            f"({best['Stake $'] / bankroll:.1%} of bankroll) · "
+            f"EV **{best['EV %']:+.1%}** · model {best['Model %']:.1%} vs "
+            f"book implied {best['Book implied %']:.1%}"
+        )
+        for r in bets[1:]:
+            msg += (f"\n- Also +EV: **{r['Market']}** @ {fmt_odds(r['Book odds'])}"
+                    f" — stake ${r['Stake $']:,.2f}, EV {r['EV %']:+.1%}")
+        if len(bets) > 1:
+            total = sum(r["Stake $"] for r in bets)
+            msg += (f"\n\nTotal stake ${total:,.2f} "
+                    f"({total / bankroll:.1%} of bankroll).")
+        msg += ("\n\nLog it in the 📒 Bet Tracker with the book and price so "
+                "CLV gets scored. +EV bets still lose all the time — the edge "
+                "only shows up over dozens of bets.")
+        st.success(msg)
+    else:
+        best = max(rows, key=lambda r: r["EV %"])
+        need = min_betable_odds(best["Model %"], min_edge)
+        st.warning(
+            f"### ⚪ Recommendation: PASS\n"
+            f"No selection clears the {min_edge:.0%} EV bar at these prices — "
+            f"not betting is the correct play here. Closest: "
+            f"**{best['Market']}** at {fmt_odds(best['Book odds'])} "
+            f"(EV {best['EV %']:+.1%}); it becomes a bet at "
+            f"**{fmt_odds(need)}** or better. Shop other books for that "
+            f"number."
+        )
+    if dead_rubber:
+        st.caption(
+            "⚠️ Dead-rubber risk above still applies — if you bet at all, "
+            "prefer the motivated side and reduce the stake."
+        )
+
+
 def render_value_table(rows):
     df = pd.DataFrame(rows)
     styled = (
@@ -262,10 +310,12 @@ with tab_analyze:
                       f"({max(pred['advance_a'], pred['advance_b']):.0%})")
     st.info(pick_line)
 
+    dead_rubber = False
     if pick != "Manual team selection" and row["date"] <= T.GROUP_STAGE_END:
         flags = rotation_flags(get_simulation(10000, DATA_STAMP)[0])
         flagged = [(t, flags[t]) for t in (team_a, team_b) if t in flags]
         if flagged:
+            dead_rubber = True
             msg = " and ".join(
                 f"**{t}** are already "
                 + ("through to the round of 32" if f == "through"
@@ -364,21 +414,7 @@ with tab_analyze:
     if rows:
         st.subheader("Value report")
         render_value_table(rows)
-        bets = [r for r in rows if r["Verdict"] == "BET"]
-        if bets:
-            total = sum(r["Stake $"] for r in bets)
-            st.success(
-                f"**{len(bets)} value bet(s) found** — total recommended stake "
-                f"${total:,.2f} ({total / bankroll:.1%} of bankroll). "
-                f"Remember: +EV bets still lose all the time. The edge only "
-                f"shows up over dozens of bets."
-            )
-        else:
-            st.info(
-                "No value at these odds — the book's price is at or better than "
-                "the model's. **Not betting is the correct play more often than "
-                "not.** Check another book or another market."
-            )
+        render_recommendation(rows, bankroll, min_edge, dead_rubber)
         check = [r for r in rows if r["Verdict"] == "CHECK INPUTS"]
         if check:
             st.warning(
@@ -387,7 +423,33 @@ with tab_analyze:
                 "(injuries, rotation) the model can't know about."
             )
     else:
-        st.info("Enter a full market (e.g. all three 1X2 odds) to get the value report.")
+        st.subheader("📋 Recommendation — prices to shop for")
+        st.caption(
+            "The model pick is the scoreboard call, not the bet. The bet is "
+            f"whatever clears the {min_edge:.0%} EV bar at your book. Shop "
+            "your books for any price at or above **Bet at ≥**, then enter "
+            "the odds above to get the full verdict with stakes."
+        )
+        shop_targets = [
+            (f"{team_a} win", p_h), ("Draw", p_d), (f"{team_b} win", p_a),
+            ("Over 2.5", pred["over"][2.5]),
+            ("Under 2.5", 1.0 - pred["over"][2.5]),
+            ("BTTS Yes", pred["btts"]), ("BTTS No", 1.0 - pred["btts"]),
+        ]
+        if knockout:
+            shop_targets += [(f"{team_a} to advance", pred["advance_a"]),
+                             (f"{team_b} to advance", pred["advance_b"])]
+        shop_df = pd.DataFrame(
+            [(label, p, 1.0 / p, min_betable_odds(p, min_edge))
+             for label, p in shop_targets],
+            columns=["Market", "Model %", "Fair odds", "Bet at ≥"],
+        )
+        st.dataframe(
+            shop_df.style.format({
+                "Model %": "{:.1%}", "Fair odds": fmt_odds, "Bet at ≥": fmt_odds,
+            }),
+            hide_index=True, width="stretch",
+        )
 
     st.divider()
     st.subheader("Most likely scorelines")
