@@ -84,6 +84,11 @@ with st.sidebar:
              "All odds you enter AND all fair odds shown use this format.",
     )
     bankroll = st.number_input("Bankroll ($)", 10.0, 1_000_000.0, 1000.0, step=50.0)
+    preview_stake = st.number_input(
+        "Payout preview stake ($)", 1.0, 100_000.0, 100.0, step=25.0,
+        help="Drives the 'bet this → win this' line under every odds box. "
+             "Display only — recommended stakes still come from Kelly.",
+    )
     kelly_mult = st.slider(
         "Kelly fraction", 0.05, 1.0, 0.25, 0.05,
         help="Fraction of the full Kelly stake. 0.25 (quarter Kelly) is the "
@@ -128,7 +133,12 @@ def fmt_odds(d):
     return f"{d:.2f}"
 
 
-def odds_input(container, label, key, placeholder_dec):
+def fmt_money(x):
+    """$1,000 for whole amounts, $12.50 otherwise."""
+    return f"${x:,.0f}" if abs(x - round(x)) < 0.005 else f"${x:,.2f}"
+
+
+def odds_input(container, label, key, placeholder_dec, preview=True):
     """Odds entry in the chosen format; always returns DECIMAL odds (or None)."""
     if odds_format == "American":
         v = container.number_input(
@@ -140,9 +150,17 @@ def odds_input(container, label, key, placeholder_dec):
         if abs(v) < 100:
             container.caption("⚠️ American odds must be ≤ −100 or ≥ +100")
             return None
-        return V.american_to_decimal(v)
-    return container.number_input(label, min_value=1.01, value=None,
-                                  placeholder=placeholder_dec, key=key)
+        d = V.american_to_decimal(v)
+    else:
+        d = container.number_input(label, min_value=1.01, value=None,
+                                   placeholder=placeholder_dec, key=key)
+    if d is not None and preview:
+        container.caption(
+            f"💵 {fmt_money(preview_stake)} wins "
+            f"**{fmt_money(preview_stake * (d - 1.0))}** "
+            f"({fmt_money(preview_stake * d)} back)"
+        )
+    return d
 
 
 def venue_for_fixture(row):
@@ -177,16 +195,21 @@ def render_recommendation(rows, bankroll, min_edge, dead_rubber=False):
                   key=lambda r: -r["EV %"])
     if bets:
         best = bets[0]
+        stake, odds = best["Stake $"], best["Book odds"]
         msg = (
-            f"### 🟢 Recommendation: {best['Market']} @ {fmt_odds(best['Book odds'])}\n"
-            f"Stake **${best['Stake $']:,.2f}** "
-            f"({best['Stake $'] / bankroll:.1%} of bankroll) · "
+            f"### 🟢 Recommendation: {best['Market']} @ {fmt_odds(odds)}\n"
+            f"Stake **${stake:,.2f}** "
+            f"({stake / bankroll:.1%} of bankroll) · "
             f"EV **{best['EV %']:+.1%}** · model {best['Model %']:.1%} vs "
-            f"book implied {best['Book implied %']:.1%}"
+            f"book implied {best['Book implied %']:.1%}\n\n"
+            f"Win: **+${stake * (odds - 1.0):,.2f}** profit "
+            f"(${stake * odds:,.2f} back) · Lose: −${stake:,.2f}"
         )
         for r in bets[1:]:
             msg += (f"\n- Also +EV: **{r['Market']}** @ {fmt_odds(r['Book odds'])}"
-                    f" — stake ${r['Stake $']:,.2f}, EV {r['EV %']:+.1%}")
+                    f" — stake ${r['Stake $']:,.2f} to win "
+                    f"${r['Stake $'] * (r['Book odds'] - 1.0):,.2f}, "
+                    f"EV {r['EV %']:+.1%}")
         if len(bets) > 1:
             total = sum(r["Stake $"] for r in bets)
             msg += (f"\n\nTotal stake ${total:,.2f} "
@@ -208,7 +231,8 @@ def render_recommendation(rows, bankroll, min_edge, dead_rubber=False):
                 f"odds you entered, the team news, and ideally a sharp book's "
                 f"line in the anchor above. If the price is real and there's "
                 f"no news, it's a bet: stake **${best['Stake $']:,.2f}** "
-                f"({best['Stake $'] / bankroll:.1%} of bankroll)."
+                f"({best['Stake $'] / bankroll:.1%} of bankroll) to win "
+                f"**${best['Stake $'] * (best['Book odds'] - 1.0):,.2f}**."
             )
         else:
             best = max(rows, key=lambda r: r["EV %"])
@@ -231,12 +255,14 @@ def render_recommendation(rows, bankroll, min_edge, dead_rubber=False):
 
 def render_value_table(rows):
     df = pd.DataFrame(rows)
+    df.insert(df.columns.get_loc("Stake $") + 1, "To win $",
+              df["Stake $"] * (df["Book odds"] - 1.0))
     styled = (
         df.style
         .format({
             "Model %": "{:.1%}", "Book implied %": "{:.1%}", "Devig %": "{:.1%}",
             "Fair odds": fmt_odds, "Book odds": fmt_odds,
-            "EV %": "{:+.1%}", "Stake $": "${:,.2f}",
+            "EV %": "{:+.1%}", "Stake $": "${:,.2f}", "To win $": "${:,.2f}",
         })
         .apply(
             lambda r: [
@@ -368,9 +394,12 @@ with tab_analyze:
             "the blend."
         )
         sc1, sc2, sc3, sc4 = st.columns([2, 2, 2, 3])
-        sharp_h = odds_input(sc1, f"{team_a} win (sharp)", "sh", "e.g. 2.45")
-        sharp_d = odds_input(sc2, "Draw (sharp)", "sd", "e.g. 3.25")
-        sharp_a = odds_input(sc3, f"{team_b} win (sharp)", "sa", "e.g. 2.95")
+        sharp_h = odds_input(sc1, f"{team_a} win (sharp)", "sh", "e.g. 2.45",
+                             preview=False)
+        sharp_d = odds_input(sc2, "Draw (sharp)", "sd", "e.g. 3.25",
+                             preview=False)
+        sharp_a = odds_input(sc3, f"{team_b} win (sharp)", "sa", "e.g. 2.95",
+                             preview=False)
         w_model = sc4.slider(
             "Model weight in blend", 0.0, 1.0, 0.3, 0.05,
             help="0.3 = trust the sharp market 70%, the model 30%. "
